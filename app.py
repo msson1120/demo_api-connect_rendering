@@ -29,10 +29,12 @@ LOG_PATH = "usage_log.csv"
 # =========================
 
 def get_client():
-    api_key = st.secrets.get("GEMINI_API_KEY", None) or os.getenv("GEMINI_API_KEY")
+    api_key = api_key_input or st.secrets.get("GEMINI_API_KEY", None) or os.getenv("GEMINI_API_KEY")
+
     if not api_key:
-        st.error("GEMINI_API_KEY가 설정되지 않았습니다.")
+        st.error("GEMINI API KEY를 입력하세요.")
         st.stop()
+
     return genai.Client(api_key=api_key)
 
 
@@ -92,6 +94,14 @@ st.title("구역계 기반 AI 조감도 생성 데모")
 st.caption("AI Studio처럼 사용하되, 사용자별 사용 여부와 호출 로그를 남기는 Streamlit 데모 엔진입니다.")
 
 with st.sidebar:
+    st.subheader("API 설정")
+
+    api_key_input = st.text_input(
+        "GEMINI API KEY",
+        type="password",
+        placeholder="AI Studio에서 발급받은 키 입력"
+    )
+
     st.header("사용자 정보")
 
     user_name = st.text_input("사용자명", placeholder="예: 홍길동")
