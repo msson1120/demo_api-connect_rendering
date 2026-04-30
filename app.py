@@ -30,7 +30,7 @@ LOG_COLUMNS = [
 ]
 
 # gpt-image-1 edit API 지원 해상도
-SUPPORTED_SIZES = ["1024x1024", "1536x1024", "1024x1536"]
+SUPPORTED_SIZES = ["auto", "1024x1024", "1536x1024", "1024x1536"]
 
 USD_TO_KRW = 1400
 
@@ -135,47 +135,27 @@ def get_client(api_key_input):
 # 이미지 전처리 (핵심 수정)
 # =========================
 
-def preprocess_image(pil_image, target_size_str):
-    """
-    ChatGPT 웹과 동일하게 동작하도록 이미지를 전처리합니다.
+def preprocess_image(pil_image):
+    img = pil_image.convert("RGBA")
 
-    핵심:
-    - RGBA로 변환 (알파채널 포함 → edit API가 inpainting 모드로 동작)
-    - 출력 해상도와 동일한 크기로 리사이즈 (geometry 보존)
-    - PNG 형식으로 직렬화
-    - 파일 크기 25MB 이하 보장
-    """
-    w, h = map(int, target_size_str.split("x"))
-
-    # RGBA 변환 (알파채널 포함해야 edit API가 제대로 동작)
-    img_rgba = pil_image.convert("RGBA")
-
-    # 출력 해상도에 맞게 리사이즈 (비율 유지, 중앙 크롭)
-    img_rgba.thumbnail((w * 2, h * 2), Image.LANCZOS)
-
-    # 정확히 타겟 해상도로 크롭 (중앙 기준)
-    iw, ih = img_rgba.size
-    left = (iw - w) // 2 if iw > w else 0
-    top = (ih - h) // 2 if ih > h else 0
-    right = left + min(iw, w)
-    bottom = top + min(ih, h)
-    img_cropped = img_rgba.crop((left, top, right, bottom))
-
-    # 타겟 사이즈 캔버스에 붙이기 (패딩 없이 stretch)
-    img_final = img_cropped.resize((w, h), Image.LANCZOS)
-
-    # PNG 직렬화
     buf = BytesIO()
-    img_final.save(buf, format="PNG", optimize=False)
+    img.save(buf, format="PNG", optimize=True, compress_level=6)
     buf.seek(0)
-
-    # 25MB 초과 시 압축 (OpenAI API 제한)
-    if buf.getbuffer().nbytes > 24 * 1024 * 1024:
-        buf = BytesIO()
-        img_final.save(buf, format="PNG", optimize=True, compress_level=6)
-        buf.seek(0)
-
     buf.name = "input.png"
+
+    if buf.getbuffer().nbytes > 24 * 1024 * 1024:
+        w, h = img.size
+        scale = (24 * 1024 * 1024 / buf.getbuffer().nbytes) ** 0.5
+        new_w = int(w * scale * 0.95)
+        new_h = int(h * scale * 0.95)
+
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+
+        buf = BytesIO()
+        img.save(buf, format="PNG", optimize=True, compress_level=6)
+        buf.seek(0)
+        buf.name = "input.png"
+
     return buf
 
 # =========================
@@ -183,7 +163,7 @@ def preprocess_image(pil_image, target_size_str):
 # =========================
 
 def generate_image(client, model_name, prompt, input_image_pil, resolution, quality):
-    input_buffer = preprocess_image(input_image_pil, resolution)
+    input_buffer = preprocess_image(input_image_pil)
 
     uploaded_file = client.files.create(
         file=input_buffer,
@@ -341,8 +321,8 @@ with st.sidebar:
     resolution = st.selectbox(
         "Resolution",
         SUPPORTED_SIZES,
-        index=1,
-        help="1536x1024 = 가로형 (조감도 권장)"
+        index=0,
+        help="auto = 입력 이미지 비율을 최대한 유지"
     )
 
     quality = st.selectbox(
