@@ -183,24 +183,52 @@ def preprocess_image(pil_image, target_size_str):
 # =========================
 
 def generate_image(client, model_name, prompt, input_image_pil, resolution, quality):
-    """
-    images.edit 엔드포인트 사용 (ChatGPT 웹과 동일한 경로)
-    - RGBA 이미지 전달로 inpainting 모드 활성화
-    - 출력 해상도와 동일한 크기로 입력 이미지 리사이즈
-    """
     input_buffer = preprocess_image(input_image_pil, resolution)
 
-    response = client.images.edit(
-        model=model_name,
-        image=input_buffer,
-        prompt=prompt,
-        size=resolution,
-        quality=quality,
-        n=1,
-        response_format="b64_json",
+    uploaded_file = client.files.create(
+        file=input_buffer,
+        purpose="vision"
     )
 
-    image_bytes = base64.b64decode(response.data[0].b64_json)
+    response = client.responses.create(
+        model="gpt-5.1",
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": prompt
+                    },
+                    {
+                        "type": "input_image",
+                        "file_id": uploaded_file.id
+                    }
+                ]
+            }
+        ],
+        tools=[
+            {
+                "type": "image_generation",
+                "model": model_name,
+                "quality": quality,
+                "size": resolution,
+                "input_fidelity": "high"
+            }
+        ]
+    )
+
+    image_base64 = None
+
+    for output in response.output:
+        if output.type == "image_generation_call":
+            image_base64 = output.result
+            break
+
+    if not image_base64:
+        raise ValueError("응답에서 생성 이미지를 찾지 못했습니다.")
+
+    image_bytes = base64.b64decode(image_base64)
     return Image.open(BytesIO(image_bytes)).convert("RGB")
 
 # =========================
@@ -223,7 +251,15 @@ with st.sidebar:
     project_name = st.text_input("프로젝트명", placeholder="예: 의왕도첨산단")
     purpose = st.text_input("활용목적", placeholder="예: QBS")
 
-    model_name = st.selectbox("모델 선택", ["gpt-image-1"], index=0)
+    model_name = st.selectbox(
+        "이미지 모델 선택",
+        [
+            "gpt-image-1.5",
+            "gpt-image-1",
+            "gpt-image-1-mini",
+        ],
+        index=0
+    )
 
     st.divider()
     st.subheader("생성 옵션")
@@ -456,4 +492,3 @@ else:
                     mime="image/png",
                     key=img_file
                 )
-                
