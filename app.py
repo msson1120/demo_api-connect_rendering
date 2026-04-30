@@ -115,6 +115,16 @@ def write_log(row: dict):
     result_df.to_csv(LOG_PATH, index=False, encoding="utf-8-sig")
 
 
+def delete_log_rows(indices_to_delete):
+    if not os.path.exists(LOG_PATH):
+        return
+
+    df = pd.read_csv(LOG_PATH, encoding="utf-8-sig")
+    df = df.drop(indices_to_delete)
+    df = df.reset_index(drop=True)
+    df.to_csv(LOG_PATH, index=False, encoding="utf-8-sig")
+
+
 def get_client_ip():
     try:
         headers = st.context.headers
@@ -433,6 +443,25 @@ else:
     tab1, tab2, tab3 = st.tabs(["상세 로그", "사용자별 요약", "모델별 요약"])
 
     with tab1:
+        log_df_display = log_df.reset_index().rename(columns={"index": "row_id"})
+
+        selected_rows = st.multiselect(
+            "삭제할 로그 선택",
+            options=log_df_display["row_id"],
+            format_func=lambda x: f"{log_df_display.loc[x, 'time']} | {log_df_display.loc[x, 'user_name']} | {log_df_display.loc[x, 'project']}"
+        )
+
+        del_col, _ = st.columns([1, 5])
+
+        with del_col:
+            if st.button("선택 삭제"):
+                if selected_rows:
+                    delete_log_rows(selected_rows)
+                    st.success("삭제 완료")
+                    st.rerun()
+                else:
+                    st.warning("삭제할 행을 선택하세요.")
+
         show_cols = [
             "time",
             "user_name",
