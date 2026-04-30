@@ -165,52 +165,19 @@ def preprocess_image(pil_image):
 def generate_image(client, model_name, prompt, input_image_pil, resolution, quality):
     input_buffer = preprocess_image(input_image_pil)
 
-    uploaded_file = client.files.create(
-        file=input_buffer,
-        purpose="vision"
+    response = client.images.edit(
+        model=model_name,
+        image=input_buffer,
+        prompt=prompt,
+        size=resolution,
+        quality=quality,
+        input_fidelity="high",
+        output_format="png",
     )
 
-    response = client.responses.create(
-        model="gpt-5.1",
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": prompt
-                    },
-                    {
-                        "type": "input_image",
-                        "file_id": uploaded_file.id
-                    }
-                ]
-            }
-        ],
-        tools=[
-            {
-                "type": "image_generation",
-                "model": model_name,
-                "action": "edit",
-                "quality": quality,
-                "size": resolution,
-                "input_fidelity": "high"
-            }
-        ],
-        tool_choice={"type": "image_generation"}
-    )
-
-    image_base64 = None
-
-    for output in response.output:
-        if output.type == "image_generation_call":
-            image_base64 = output.result
-            break
-
-    if not image_base64:
-        raise ValueError("응답에서 생성 이미지를 찾지 못했습니다.")
-
+    image_base64 = response.data[0].b64_json
     image_bytes = base64.b64decode(image_base64)
+
     return Image.open(BytesIO(image_bytes)).convert("RGB")
 
 
@@ -248,8 +215,8 @@ No geometry changes.
 """
 
 
-def run_render_pipeline(client, model_name, user_prompt, input_pil, resolution, quality, pass_count):
-    step1 = generate_image(
+def run_render_pipeline(client, model_name, user_prompt, input_pil, resolution, quality):
+    return generate_image(
         client=client,
         model_name=model_name,
         prompt=user_prompt,
@@ -257,32 +224,6 @@ def run_render_pipeline(client, model_name, user_prompt, input_pil, resolution, 
         resolution=resolution,
         quality=quality,
     )
-
-    if pass_count == 1:
-        return step1
-
-    step2 = generate_image(
-        client=client,
-        model_name=model_name,
-        prompt=build_refine_prompt(),
-        input_image_pil=step1,
-        resolution=resolution,
-        quality=quality,
-    )
-
-    if pass_count == 2:
-        return step2
-
-    step3 = generate_image(
-        client=client,
-        model_name=model_name,
-        prompt=build_polish_prompt(),
-        input_image_pil=step2,
-        resolution=resolution,
-        quality=quality,
-    )
-
-    return step3
 
 
 # =========================
@@ -334,24 +275,10 @@ with st.sidebar:
 
     input_fidelity = "high"
 
-    render_mode = st.selectbox(
-        "Rendering Mode",
-        [
-            "빠른 생성 (1-pass)",
-            "고급 렌더링 (2-pass)",
-            "프리미엄 렌더링 (3-pass)",
-        ],
-        index=1,
-        help="pass가 많을수록 품질은 좋아지지만 비용과 시간이 증가합니다."
-    )
+    render_mode = "원본 보존 생성 (1-pass)"
+    pass_count = 1
 
-    pass_count_map = {
-        "빠른 생성 (1-pass)": 1,
-        "고급 렌더링 (2-pass)": 2,
-        "프리미엄 렌더링 (3-pass)": 3,
-    }
-
-    pass_count = pass_count_map[render_mode]
+    st.info("현재는 원본 보존을 위해 1-pass로 고정되어 있습니다.")
 
     st.divider()
     st.caption(f"예상 비용: {estimate_cost_krw(model_name, quality, pass_count):,}원 / 장")
@@ -421,7 +348,6 @@ with col2:
                     input_pil=input_pil,
                     resolution=resolution,
                     quality=quality,
-                    pass_count=pass_count,
                 )
 
             st.image(result_image, caption="생성 결과", use_container_width=True)
