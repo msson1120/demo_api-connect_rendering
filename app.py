@@ -7,6 +7,8 @@ from datetime import datetime
 from PIL import Image
 from io import BytesIO
 
+import hashlib
+
 from google import genai
 from google.genai import types
 
@@ -22,6 +24,19 @@ st.set_page_config(
 )
 
 LOG_PATH = "usage_log.csv"
+
+
+# =========================
+# 비용 추정 설정
+# 실제 과금액이 아니라 데모용 추정값입니다.
+# 필요하면 모델별 단가를 직접 조정하세요.
+# =========================
+
+COST_PER_CALL_KRW = {
+    "gemini-3.1-flash-image-preview": 50,
+    "gemini-3-pro-image-preview": 150,
+    "gemini-2.5-flash-image": 40,
+}
 
 
 # =========================
@@ -51,6 +66,33 @@ def write_log(row: dict):
         df.to_csv(LOG_PATH, index=False, encoding="utf-8-sig")
 
 
+def get_client_ip():
+    try:
+        headers = st.context.headers
+        ip = headers.get("x-forwarded-for", "")
+        if ip:
+            return ip.split(",")[0].strip()
+
+        ip = headers.get("x-real-ip", "")
+        if ip:
+            return ip.strip()
+
+        return "unknown"
+    except Exception:
+        return "unknown"
+
+
+def mask_ip(ip: str):
+    if not ip or ip == "unknown":
+        return "unknown"
+
+    return hashlib.sha256(ip.encode("utf-8")).hexdigest()[:12]
+
+
+def estimate_cost_krw(model_name: str):
+    return COST_PER_CALL_KRW.get(model_name, 0)
+
+
 # =========================
 # 이미지 변환
 # =========================
@@ -71,17 +113,53 @@ def extract_image_from_response(response):
 # Gemini 호출
 # =========================
 
-def generate_image(client, model_name, prompt, input_image):
-    response = client.models.generate_content(
-        model=model_name,
-        contents=[
-            prompt,
-            input_image
-        ],
-        config=types.GenerateContentConfig(
-            response_modalities=["TEXT", "IMAGE"]
+def generate_image(client, model_name, prompt, input_image, resolution, thinking_level, top_p):
+    config_kwargs = {
+        "response_modalities": ["TEXT", "IMAGE"],
+        "top_p": top_p,
+    }
+
+    image_config_kwargs = {}
+
+    if resolution == "1K":
+        image_config_kwargs["image_size"] = "1K"
+    elif resolution == "2K":
+        image_config_kwargs["image_size"] = "2K"
+
+    if image_config_kwargs:
+        config_kwargs["image_config"] = types.ImageConfig(**image_config_kwargs)
+
+    if thinking_level != "none":
+        thinking_budget_map = {
+            "low": 1024,
+            "medium": 4096,
+            "high": 8192,
+        }
+        config_kwargs["thinking_config"] = types.ThinkingConfig(
+            thinking_budget=thinking_budget_map[thinking_level]
         )
-    )
+
+    try:
+        response = client.models.generate_content(
+            model=model_name,
+            contents=[
+                prompt,
+                input_image
+            ],
+            config=types.GenerateContentConfig(**config_kwargs)
+        )
+
+    except Exception:
+        response = client.models.generate_content(
+            model=model_name,
+            contents=[
+                prompt,
+                input_image
+            ],
+            config=types.GenerateContentConfig(
+                response_modalities=["TEXT", "IMAGE"]
+            )
+        )
 
     return extract_image_from_response(response)
 
@@ -90,8 +168,8 @@ def generate_image(client, model_name, prompt, input_image):
 # UI
 # =========================
 
-st.title("구역계 기반 AI 조감도 생성 데모")
-st.caption("AI Studio처럼 사용하되, 사용자별 사용 여부와 호출 로그를 남기는 Streamlit 데모 엔진입니다.")
+st.title("PlanVision AI - demo")
+st.caption("AI Studio처럼 사용하되, 사용자별 사용 여부와 호출 로그를 남기는 데모 프로그램입니다.")
 
 with st.sidebar:
     st.subheader("API 설정")
@@ -115,6 +193,31 @@ with st.sidebar:
             "gemini-2.5-flash-image"
         ],
         index=0
+    )
+
+    st.divider()
+    st.subheader("생성 옵션")
+
+    resolution = st.selectbox(
+        "Resolution",
+        ["1K", "2K"],
+        index=0,
+        help="모델에 따라 지원되지 않을 수 있습니다."
+    )
+
+    thinking_level = st.selectbox(
+        "Thinking level",
+        ["none", "low", "medium", "high"],
+        index=0,
+        help="이미지 모델에서는 지원되지 않을 수 있습니다."
+    )
+
+    top_p = st.slider(
+        "Top P",
+        min_value=0.1,
+        max_value=1.0,
+        value=0.95,
+        step=0.05
     )
 
     st.divider()
@@ -188,7 +291,10 @@ with col2:
                     client=client,
                     model_name=model_name,
                     prompt=prompt,
-                    input_image=input_pil
+                    input_image=input_pil,
+                    resolution=resolution,
+                    thinking_level=thinking_level,
+                    top_p=top_p
                 )
 
             elapsed_sec = round(time.time() - start_time, 2)
@@ -217,17 +323,17 @@ with col2:
             st.error(error_message)
 
         finally:
+            raw_ip = get_client_ip()
+            masked_ip = mask_ip(raw_ip)
+
             write_log({
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "request_id": request_id,
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "user_name": user_name,
-                "project_name": project_name,
+                "ip": masked_ip,
+                "project": project_name,
                 "model": model_name,
-                "input_filename": uploaded_image.name if uploaded_image else "",
                 "prompt_length": len(prompt),
-                "success": success,
-                "elapsed_sec": elapsed_sec,
-                "error_message": error_message
+                "cost_krw_est": estimate_cost_krw(model_name),
             })
 
 
@@ -237,6 +343,17 @@ st.subheader("최근 사용 로그")
 
 if os.path.exists(LOG_PATH):
     log_df = pd.read_csv(LOG_PATH)
-    st.dataframe(log_df.tail(20), use_container_width=True)
+    display_cols = [
+        "time",
+        "user_name",
+        "ip",
+        "project",
+        "model",
+        "prompt_length",
+        "cost_krw_est",
+    ]
+
+    existing_cols = [c for c in display_cols if c in log_df.columns]
+    st.dataframe(log_df[existing_cols].tail(20), use_container_width=True)
 else:
     st.caption("아직 기록된 사용 로그가 없습니다.")
