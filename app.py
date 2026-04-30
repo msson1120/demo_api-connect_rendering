@@ -58,10 +58,31 @@ def get_client():
 # =========================
 
 def write_log(row: dict):
+    columns = [
+        "time",
+        "user_name",
+        "ip",
+        "project",
+        "model",
+        "prompt_length",
+        "cost_krw_est"
+    ]
+
     df = pd.DataFrame([row])
 
+    for col in columns:
+        if col not in df.columns:
+            df[col] = None
+
+    df = df[columns]
+
     if os.path.exists(LOG_PATH):
-        df.to_csv(LOG_PATH, mode="a", header=False, index=False, encoding="utf-8-sig")
+        existing_df = pd.read_csv(LOG_PATH)
+
+        if list(existing_df.columns) != columns:
+            df.to_csv(LOG_PATH, index=False, encoding="utf-8-sig")
+        else:
+            df.to_csv(LOG_PATH, mode="a", header=False, index=False, encoding="utf-8-sig")
     else:
         df.to_csv(LOG_PATH, index=False, encoding="utf-8-sig")
 
