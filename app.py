@@ -182,7 +182,7 @@ def preprocess_image(pil_image, target_size_str):
 # OpenAI 호출 (수정)
 # =========================
 
-def generate_image(client, model_name, prompt, input_image_pil, resolution, quality, input_fidelity):
+def generate_image(client, model_name, prompt, input_image_pil, resolution, quality):
     """
     images.edit 엔드포인트 사용 (ChatGPT 웹과 동일한 경로)
     - RGBA 이미지 전달로 inpainting 모드 활성화
@@ -196,7 +196,6 @@ def generate_image(client, model_name, prompt, input_image_pil, resolution, qual
         prompt=prompt,
         size=resolution,
         quality=quality,
-        input_fidelity=input_fidelity,
         n=1,
         response_format="b64_json",
     )
@@ -243,12 +242,7 @@ with st.sidebar:
         help="조감도 최종본은 high 권장 (장당 약 238원)"
     )
 
-    input_fidelity = st.selectbox(
-        "Input Fidelity",
-        ["high", "low"],
-        index=0,
-        help="high: 입력 이미지 geometry 최대 보존 (구역도 기반 필수)"
-    )
+    input_fidelity = "high"
 
     st.divider()
     st.caption(f"예상 비용: {estimate_cost_krw(model_name, quality):,}원 / 장")
@@ -318,7 +312,6 @@ with col2:
                     input_image_pil=input_pil,
                     resolution=resolution,
                     quality=quality,
-                    input_fidelity=input_fidelity,
                 )
 
             st.image(result_image, caption="생성 결과", use_container_width=True)
@@ -463,3 +456,4 @@ else:
                     mime="image/png",
                     key=img_file
                 )
+                
