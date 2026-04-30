@@ -3,7 +3,7 @@ import pandas as pd
 import time
 import os
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from PIL import Image
 from io import BytesIO
 
@@ -33,12 +33,6 @@ LOG_COLUMNS = [
     "cost_krw_est",
 ]
 
-COST_PER_CALL_KRW = {
-    "gemini-3.1-flash-image-preview": 50,
-    "gemini-3-pro-image-preview": 150,
-    "gemini-2.5-flash-image": 40,
-}
-
 
 # =========================
 # 로그 유틸
@@ -67,6 +61,39 @@ def read_log() -> pd.DataFrame:
     df.to_csv(LOG_PATH, index=False, encoding="utf-8-sig")
 
     return df
+
+
+def prepare_log_df(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    if "time" in df.columns:
+        df["time_dt"] = pd.to_datetime(df["time"], errors="coerce")
+    else:
+        df["time_dt"] = pd.NaT
+
+    df["cost_krw_est"] = pd.to_numeric(df["cost_krw_est"], errors="coerce").fillna(0)
+    df["prompt_length"] = pd.to_numeric(df["prompt_length"], errors="coerce").fillna(0)
+
+    return df
+
+
+def filter_log_by_period(df: pd.DataFrame, period: str) -> pd.DataFrame:
+    df = prepare_log_df(df)
+
+    now = datetime.now(timezone(timedelta(hours=9))).replace(tzinfo=None)
+
+    if period == "오늘":
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif period == "최근 7일":
+        start = now - timedelta(days=7)
+    elif period == "이번 달":
+        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    elif period == "전체":
+        return df
+    else:
+        return df
+
+    return df[df["time_dt"] >= start]
 
 
 def write_log(row: dict):
@@ -101,6 +128,11 @@ def get_client_ip():
         return "unknown"
 
 
+def now_kst_str():
+    kst = timezone(timedelta(hours=9))
+    return datetime.now(kst).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def mask_ip(ip: str):
     if not ip or ip == "unknown":
         return "unknown"
@@ -108,8 +140,14 @@ def mask_ip(ip: str):
     return hashlib.sha256(ip.encode("utf-8")).hexdigest()[:12]
 
 
-def estimate_cost_krw(model_name: str):
-    return COST_PER_CALL_KRW.get(model_name, 0)
+def estimate_cost_krw(model_name: str, prompt_length: int):
+    token_est = prompt_length / 4
+    cost_per_1k = {
+        "gemini-3.1-flash-image-preview": 5,
+        "gemini-3-pro-image-preview": 15,
+        "gemini-2.5-flash-image": 4,
+    }
+    return int((token_est / 1000) * cost_per_1k.get(model_name, 5))
 
 
 # =========================
@@ -353,27 +391,109 @@ with col2:
             masked_ip = mask_ip(raw_ip)
 
             write_log({
-                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "time": now_kst_str(),
                 "user_name": user_name,
                 "ip": masked_ip,
                 "project": project_name,
                 "model": model_name,
                 "prompt_length": len(prompt),
-                "cost_krw_est": estimate_cost_krw(model_name),
+                "cost_krw_est": estimate_cost_krw(model_name, len(prompt)),
             })
-
-            st.rerun()
 
 
 st.divider()
-st.subheader("최근 사용 로그")
+st.subheader("사용 로그 관리")
 
 log_df = read_log()
 
-if len(log_df) > 0:
-    st.dataframe(
-        log_df.tail(20).reset_index(drop=True),
-        use_container_width=True
-    )
-else:
+if len(log_df) == 0:
     st.caption("아직 기록된 사용 로그가 없습니다.")
+else:
+    period = st.radio(
+        "조회 기간",
+        ["오늘", "최근 7일", "이번 달", "전체"],
+        horizontal=True
+    )
+
+    filtered_df = filter_log_by_period(log_df, period)
+
+    total_calls = len(filtered_df)
+    unique_users = filtered_df["user_name"].nunique()
+    total_cost = int(filtered_df["cost_krw_est"].sum())
+    avg_prompt_length = int(filtered_df["prompt_length"].mean()) if total_calls > 0 else 0
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric("호출 수", f"{total_calls:,}회")
+    c2.metric("사용자 수", f"{unique_users:,}명")
+    c3.metric("추정 비용", f"{total_cost:,}원")
+    c4.metric("평균 프롬프트 길이", f"{avg_prompt_length:,}자")
+
+    st.divider()
+
+    tab1, tab2, tab3 = st.tabs(["상세 로그", "사용자별 요약", "모델별 요약"])
+
+    with tab1:
+        show_cols = [
+            "time",
+            "user_name",
+            "ip",
+            "project",
+            "model",
+            "prompt_length",
+            "cost_krw_est",
+        ]
+
+        st.dataframe(
+            filtered_df[show_cols].sort_values("time", ascending=False).reset_index(drop=True),
+            use_container_width=True
+        )
+
+    with tab2:
+        user_summary = (
+            filtered_df
+            .groupby("user_name", dropna=False)
+            .agg(
+                호출수=("user_name", "count"),
+                추정비용=("cost_krw_est", "sum"),
+                평균프롬프트길이=("prompt_length", "mean"),
+            )
+            .reset_index()
+            .rename(columns={"user_name": "사용자명"})
+        )
+
+        user_summary["추정비용"] = user_summary["추정비용"].astype(int)
+        user_summary["평균프롬프트길이"] = user_summary["평균프롬프트길이"].fillna(0).astype(int)
+
+        st.dataframe(
+            user_summary.sort_values("호출수", ascending=False).reset_index(drop=True),
+            use_container_width=True
+        )
+
+    with tab3:
+        model_summary = (
+            filtered_df
+            .groupby("model", dropna=False)
+            .agg(
+                호출수=("model", "count"),
+                추정비용=("cost_krw_est", "sum"),
+                평균프롬프트길이=("prompt_length", "mean"),
+            )
+            .reset_index()
+            .rename(columns={"model": "모델"})
+        )
+
+        model_summary["추정비용"] = model_summary["추정비용"].astype(int)
+        model_summary["평균프롬프트길이"] = model_summary["평균프롬프트길이"].fillna(0).astype(int)
+
+        st.dataframe(
+            model_summary.sort_values("호출수", ascending=False).reset_index(drop=True),
+            use_container_width=True
+        )
+
+    st.download_button(
+        "현재 조회 로그 다운로드",
+        data=filtered_df.drop(columns=["time_dt"], errors="ignore").to_csv(index=False, encoding="utf-8-sig"),
+        file_name=f"usage_log_{period}.csv",
+        mime="text/csv"
+    )
