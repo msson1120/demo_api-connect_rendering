@@ -30,7 +30,14 @@ LOG_COLUMNS = [
 ]
 
 # gpt-image-1 edit API 지원 해상도
-SUPPORTED_SIZES = ["auto", "1024x1024", "1536x1024", "1024x1536"]
+SUPPORTED_SIZES = [
+    "auto",
+    "1536x1024",
+    "2048x1152",
+    "3840x2160",
+    "1024x1024",
+    "1024x1536",
+]
 
 USD_TO_KRW = 1400
 
@@ -136,48 +143,119 @@ def get_client(api_key_input):
 # =========================
 
 def preprocess_image(pil_image):
-    img = pil_image.convert("RGBA")
+    img = pil_image.convert("RGB")
 
     buf = BytesIO()
-    img.save(buf, format="PNG", optimize=True, compress_level=6)
+    img.save(buf, format="PNG", optimize=False)
     buf.seek(0)
     buf.name = "input.png"
 
-    if buf.getbuffer().nbytes > 24 * 1024 * 1024:
-        w, h = img.size
-        scale = (24 * 1024 * 1024 / buf.getbuffer().nbytes) ** 0.5
-        new_w = int(w * scale * 0.95)
-        new_h = int(h * scale * 0.95)
-
-        img = img.resize((new_w, new_h), Image.LANCZOS)
-
-        buf = BytesIO()
-        img.save(buf, format="PNG", optimize=True, compress_level=6)
-        buf.seek(0)
-        buf.name = "input.png"
-
     return buf
+
+
+def fit_to_16_9(image, target_size=(1792, 1024)):
+    target_w, target_h = target_size
+    img = image.convert("RGB")
+    w, h = img.size
+
+    scale = max(target_w / w, target_h / h)
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+
+    img = img.resize((new_w, new_h), Image.LANCZOS)
+
+    left = (new_w - target_w) // 2
+    top = (new_h - target_h) // 2
+    right = left + target_w
+    bottom = top + target_h
+
+    return img.crop((left, top, right, bottom))
 
 # =========================
 # OpenAI 호출 (수정)
 # =========================
 
+def build_web_like_prompt(user_prompt):
+    return f"""
+You are editing the uploaded image, not generating a new unrelated image.
+
+The uploaded image is the fixed base image and the only geometry source.
+
+CRITICAL WEB-LIKE EDITING RULES:
+- Preserve the exact canvas, crop, orientation, site boundary, road network, parcel boundaries, colored zone shapes, surrounding satellite context, and all spatial relationships.
+- Do not invent a different city.
+- Do not reinterpret the site layout.
+- Do not replace the whole scene with a newly imagined aerial image.
+- Only transform the colored zoning areas into photorealistic aerial architecture and landscape.
+- Keep the camera strictly vertical top-down, 90-degree nadir.
+- No oblique view.
+- No tilted camera.
+- No cinematic drone angle.
+- No visible flat zoning colors in the final result.
+- No painterly, blurry, CG, cartoon, or miniature-model look.
+- The final result must look like a high-resolution real satellite / aerial masterplan visualization.
+
+USER TASK:
+{user_prompt}
+
+FAILURE CONDITIONS:
+- If the road network moves, disappears, bends, or changes, the result is wrong.
+- If the site boundary changes, the result is wrong.
+- If the output looks like a different neighborhood, the result is wrong.
+- If the image becomes blurry or painterly, the result is wrong.
+- If any flat zoning color remains visible, the result is wrong.
+"""
+
+
 def generate_image(client, model_name, prompt, input_image_pil, resolution, quality):
     input_buffer = preprocess_image(input_image_pil)
 
-    response = client.images.edit(
-        model=model_name,
-        image=input_buffer,
-        prompt=prompt,
-        size=resolution,
-        quality=quality,
-        input_fidelity="high",
-        output_format="png",
+    uploaded_file = client.files.create(
+        file=input_buffer,
+        purpose="vision"
     )
 
-    image_base64 = response.data[0].b64_json
-    image_bytes = base64.b64decode(image_base64)
+    full_prompt = build_web_like_prompt(prompt)
 
+    tool_config = {
+        "type": "image_generation",
+        "model": model_name,
+        "action": "edit",
+        "quality": quality,
+        "size": resolution,
+    }
+
+    response = client.responses.create(
+        model="gpt-5.5",
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": full_prompt,
+                    },
+                    {
+                        "type": "input_image",
+                        "file_id": uploaded_file.id,
+                    },
+                ],
+            }
+        ],
+        tools=[tool_config],
+    )
+
+    image_base64 = None
+
+    for output in response.output:
+        if output.type == "image_generation_call":
+            image_base64 = output.result
+            break
+
+    if not image_base64:
+        raise RuntimeError("이미지 생성 결과를 찾지 못했습니다. 모델/해상도/quality 조합을 확인하세요.")
+
+    image_bytes = base64.b64decode(image_base64)
     return Image.open(BytesIO(image_bytes)).convert("RGB")
 
 
@@ -216,14 +294,32 @@ No geometry changes.
 
 
 def run_render_pipeline(client, model_name, user_prompt, input_pil, resolution, quality):
-    return generate_image(
-        client=client,
-        model_name=model_name,
-        prompt=user_prompt,
-        input_image_pil=input_pil,
-        resolution=resolution,
-        quality=quality,
-    )
+    fallback_sizes = []
+
+    if resolution not in fallback_sizes:
+        fallback_sizes.append(resolution)
+
+    for s in ["2048x1152", "1536x1024", "auto"]:
+        if s not in fallback_sizes:
+            fallback_sizes.append(s)
+
+    last_error = None
+
+    for size_try in fallback_sizes:
+        try:
+            return generate_image(
+                client=client,
+                model_name=model_name,
+                prompt=user_prompt,
+                input_image_pil=input_pil,
+                resolution=size_try,
+                quality=quality,
+            )
+        except Exception as e:
+            last_error = e
+            continue
+
+    raise last_error
 
 
 # =========================
@@ -231,7 +327,7 @@ def run_render_pipeline(client, model_name, user_prompt, input_pil, resolution, 
 # =========================
 
 st.title("PlanVision AI - demo")
-st.caption("GPT Image-1 Edit API를 ChatGPT 웹과 동일한 방식으로 호출합니다.")
+st.caption("ChatGPT 웹과 최대한 유사한 Responses API 기반 이미지 편집 파이프라인입니다.")
 
 with st.sidebar:
     st.subheader("API 설정")
@@ -249,11 +345,13 @@ with st.sidebar:
     model_name = st.selectbox(
         "이미지 모델 선택",
         [
+            "gpt-image-2",
             "gpt-image-1.5",
             "gpt-image-1",
             "gpt-image-1-mini",
         ],
-        index=0
+        index=0,
+        help="ChatGPT 웹과 가장 가까운 결과를 노릴 때는 우선 최신 이미지 모델부터 테스트하세요. 모델별 지원 파라미터가 다를 수 있습니다."
     )
 
     st.divider()
@@ -349,6 +447,8 @@ with col2:
                     resolution=resolution,
                     quality=quality,
                 )
+
+                result_image = fit_to_16_9(result_image, target_size=(1792, 1024))
 
             st.image(result_image, caption="생성 결과", use_container_width=True)
 
