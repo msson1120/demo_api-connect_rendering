@@ -1,4 +1,4 @@
 streamlit
 pandas
 pillow
-openai>=1.99.0
+openai>=2.8.0
