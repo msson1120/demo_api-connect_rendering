@@ -209,52 +209,22 @@ FAILURE CONDITIONS:
 
 def generate_image(client, model_name, prompt, input_image_pil, resolution, quality):
     input_buffer = preprocess_image(input_image_pil)
-
-    uploaded_file = client.files.create(
-        file=input_buffer,
-        purpose="vision"
-    )
-
     full_prompt = build_web_like_prompt(prompt)
 
-    tool_config = {
-        "type": "image_generation",
+    edit_kwargs = {
         "model": model_name,
-        "action": "edit",
-        "quality": quality,
+        "image": input_buffer,
+        "prompt": full_prompt,
         "size": resolution,
+        "quality": quality,
+        "output_format": "png",
     }
 
-    response = client.responses.create(
-        model="gpt-5.5",
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": full_prompt,
-                    },
-                    {
-                        "type": "input_image",
-                        "file_id": uploaded_file.id,
-                    },
-                ],
-            }
-        ],
-        tools=[tool_config],
-    )
+    if model_name != "gpt-image-2":
+        edit_kwargs["input_fidelity"] = "high"
 
-    image_base64 = None
-
-    for output in response.output:
-        if output.type == "image_generation_call":
-            image_base64 = output.result
-            break
-
-    if not image_base64:
-        raise RuntimeError("이미지 생성 결과를 찾지 못했습니다. 모델/해상도/quality 조합을 확인하세요.")
-
+    response = client.images.edit(**edit_kwargs)
+    image_base64 = response.data[0].b64_json
     image_bytes = base64.b64decode(image_base64)
     return Image.open(BytesIO(image_bytes)).convert("RGB")
 
@@ -327,7 +297,7 @@ def run_render_pipeline(client, model_name, user_prompt, input_pil, resolution, 
 # =========================
 
 st.title("PlanVision AI - demo")
-st.caption("ChatGPT 웹과 최대한 유사한 Responses API 기반 이미지 편집 파이프라인입니다.")
+st.caption("Image API (images.edit) 기반 이미지 편집 파이프라인 | gpt-image-2는 input_fidelity 자동 제외")
 
 with st.sidebar:
     st.subheader("API 설정")
