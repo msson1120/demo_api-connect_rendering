@@ -26,7 +26,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 LOG_COLUMNS = [
     "time", "user_name", "ip", "project", "purpose",
     "model", "quality", "resolution", "input_fidelity",
-    "prompt_length", "cost_krw_est", "output_path",
+    "render_mode", "prompt_length", "cost_krw_est", "output_path",
 ]
 
 # gpt-image-1 edit API 지원 해상도
@@ -116,9 +116,9 @@ def mask_ip(ip):
         return "unknown"
     return hashlib.sha256(ip.encode("utf-8")).hexdigest()[:12]
 
-def estimate_cost_krw(model_name, quality):
+def estimate_cost_krw(model_name, quality, pass_count=1):
     usd = OPENAI_IMAGE_COST_USD.get(model_name, {}).get(quality, 0.04)
-    return int(round(usd * USD_TO_KRW))
+    return int(round(usd * USD_TO_KRW * pass_count))
 
 # =========================
 # OpenAI Client
@@ -211,11 +211,13 @@ def generate_image(client, model_name, prompt, input_image_pil, resolution, qual
             {
                 "type": "image_generation",
                 "model": model_name,
+                "action": "edit",
                 "quality": quality,
                 "size": resolution,
                 "input_fidelity": "high"
             }
-        ]
+        ],
+        tool_choice={"type": "image_generation"}
     )
 
     image_base64 = None
@@ -230,6 +232,78 @@ def generate_image(client, model_name, prompt, input_image_pil, resolution, qual
 
     image_bytes = base64.b64decode(image_base64)
     return Image.open(BytesIO(image_bytes)).convert("RGB")
+
+
+def build_refine_prompt():
+    return """
+Keep the image composition, road geometry, parcel boundaries, site boundary, terrain, and camera angle exactly the same.
+
+Improve only visual realism:
+- make the scene look like a real high-altitude aerial photograph
+- improve sunlight, shadow consistency, roof materials, facade details, roads, trees, and ground textures
+- remove artificial CG look, cartoon style, plastic textures, and repetitive patterns
+- preserve all original spatial relationships and layout
+
+Do not redesign the masterplan.
+Do not move, rotate, resize, or reshape any road, block, parcel, or building mass.
+"""
+
+
+def build_polish_prompt():
+    return """
+Final polish pass.
+
+Keep everything spatially identical.
+
+Enhance only fine visual quality:
+- more natural vegetation density
+- more realistic roof details, solar panels, HVAC units, skylights, and rooftop gardens
+- better material variation
+- subtle atmospheric haze
+- consistent photoreal aerial lighting
+- remove remaining artificial edges, flat colors, or repeated patterns
+
+The final result must look like a real professional aerial masterplan visualization.
+No geometry changes.
+"""
+
+
+def run_render_pipeline(client, model_name, user_prompt, input_pil, resolution, quality, pass_count):
+    step1 = generate_image(
+        client=client,
+        model_name=model_name,
+        prompt=user_prompt,
+        input_image_pil=input_pil,
+        resolution=resolution,
+        quality=quality,
+    )
+
+    if pass_count == 1:
+        return step1
+
+    step2 = generate_image(
+        client=client,
+        model_name=model_name,
+        prompt=build_refine_prompt(),
+        input_image_pil=step1,
+        resolution=resolution,
+        quality=quality,
+    )
+
+    if pass_count == 2:
+        return step2
+
+    step3 = generate_image(
+        client=client,
+        model_name=model_name,
+        prompt=build_polish_prompt(),
+        input_image_pil=step2,
+        resolution=resolution,
+        quality=quality,
+    )
+
+    return step3
+
 
 # =========================
 # UI
@@ -280,8 +354,27 @@ with st.sidebar:
 
     input_fidelity = "high"
 
+    render_mode = st.selectbox(
+        "Rendering Mode",
+        [
+            "빠른 생성 (1-pass)",
+            "고급 렌더링 (2-pass)",
+            "프리미엄 렌더링 (3-pass)",
+        ],
+        index=1,
+        help="pass가 많을수록 품질은 좋아지지만 비용과 시간이 증가합니다."
+    )
+
+    pass_count_map = {
+        "빠른 생성 (1-pass)": 1,
+        "고급 렌더링 (2-pass)": 2,
+        "프리미엄 렌더링 (3-pass)": 3,
+    }
+
+    pass_count = pass_count_map[render_mode]
+
     st.divider()
-    st.caption(f"예상 비용: {estimate_cost_krw(model_name, quality):,}원 / 장")
+    st.caption(f"예상 비용: {estimate_cost_krw(model_name, quality, pass_count):,}원 / 장")
 
     log_df_sidebar = read_log()
     st.download_button(
@@ -341,13 +434,14 @@ with col2:
             client = get_client(api_key_input)
 
             with st.spinner("이미지 생성 중... (high quality 기준 30-60초 소요)"):
-                result_image = generate_image(
+                result_image = run_render_pipeline(
                     client=client,
                     model_name=model_name,
-                    prompt=prompt,
-                    input_image_pil=input_pil,
+                    user_prompt=prompt,
+                    input_pil=input_pil,
                     resolution=resolution,
                     quality=quality,
+                    pass_count=pass_count,
                 )
 
             st.image(result_image, caption="생성 결과", use_container_width=True)
@@ -387,7 +481,8 @@ with col2:
                 "resolution": resolution,
                 "input_fidelity": input_fidelity,
                 "prompt_length": len(prompt),
-                "cost_krw_est": estimate_cost_krw(model_name, quality),
+                "render_mode": render_mode,
+                "cost_krw_est": estimate_cost_krw(model_name, quality, pass_count),
                 "output_path": output_path,
             })
 
