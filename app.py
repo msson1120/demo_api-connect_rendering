@@ -34,7 +34,6 @@ SUPPORTED_SIZES = [
     "auto",
     "1536x1024",
     "2048x1152",
-    "3840x2160",
     "1024x1024",
     "1024x1536",
 ]
@@ -42,12 +41,30 @@ SUPPORTED_SIZES = [
 USD_TO_KRW = 1400
 
 OPENAI_IMAGE_COST_USD = {
+    "gpt-image-2": {
+        "low": 0.005,
+        "medium": 0.041,
+        "high": 0.165,
+        "auto": 0.041,
+    },
+    "gpt-image-1.5": {
+        "low": 0.013,
+        "medium": 0.05,
+        "high": 0.2,
+        "auto": 0.05,
+    },
     "gpt-image-1": {
-        "low": 0.01,
-        "medium": 0.04,
-        "high": 0.17,
-        "auto": 0.04,
-    }
+        "low": 0.016,
+        "medium": 0.063,
+        "high": 0.25,
+        "auto": 0.063,
+    },
+    "gpt-image-1-mini": {
+        "low": 0.006,
+        "medium": 0.015,
+        "high": 0.052,
+        "auto": 0.015,
+    },
 }
 
 # =========================
@@ -146,30 +163,26 @@ def preprocess_image(pil_image):
     img = pil_image.convert("RGB")
 
     buf = BytesIO()
-    img.save(buf, format="PNG", optimize=False)
+    img.save(buf, format="PNG", optimize=True, compress_level=6)
     buf.seek(0)
     buf.name = "input.png"
 
+    max_bytes = 48 * 1024 * 1024
+
+    if buf.getbuffer().nbytes > max_bytes:
+        w, h = img.size
+        scale = (max_bytes / buf.getbuffer().nbytes) ** 0.5 * 0.95
+        new_w = max(16, int(w * scale))
+        new_h = max(16, int(h * scale))
+
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+
+        buf = BytesIO()
+        img.save(buf, format="PNG", optimize=True, compress_level=6)
+        buf.seek(0)
+        buf.name = "input.png"
+
     return buf
-
-
-def fit_to_16_9(image, target_size=(1792, 1024)):
-    target_w, target_h = target_size
-    img = image.convert("RGB")
-    w, h = img.size
-
-    scale = max(target_w / w, target_h / h)
-    new_w = int(w * scale)
-    new_h = int(h * scale)
-
-    img = img.resize((new_w, new_h), Image.LANCZOS)
-
-    left = (new_w - target_w) // 2
-    top = (new_h - target_h) // 2
-    right = left + target_w
-    bottom = top + target_h
-
-    return img.crop((left, top, right, bottom))
 
 # =========================
 # OpenAI 호출 (수정)
@@ -264,32 +277,14 @@ No geometry changes.
 
 
 def run_render_pipeline(client, model_name, user_prompt, input_pil, resolution, quality):
-    fallback_sizes = []
-
-    if resolution not in fallback_sizes:
-        fallback_sizes.append(resolution)
-
-    for s in ["2048x1152", "1536x1024", "auto"]:
-        if s not in fallback_sizes:
-            fallback_sizes.append(s)
-
-    last_error = None
-
-    for size_try in fallback_sizes:
-        try:
-            return generate_image(
-                client=client,
-                model_name=model_name,
-                prompt=user_prompt,
-                input_image_pil=input_pil,
-                resolution=size_try,
-                quality=quality,
-            )
-        except Exception as e:
-            last_error = e
-            continue
-
-    raise last_error
+    return generate_image(
+        client=client,
+        model_name=model_name,
+        prompt=user_prompt,
+        input_image_pil=input_pil,
+        resolution=resolution,
+        quality=quality,
+    )
 
 
 # =========================
@@ -338,7 +333,7 @@ with st.sidebar:
         "Quality",
         ["high", "medium", "low", "auto"],
         index=0,
-        help="조감도 최종본은 high 권장 (장당 약 238원)"
+        help="최종본은 high 권장. gpt-image-2는 해상도와 품질에 따라 비용이 달라집니다."
     )
 
     input_fidelity = "high"
@@ -408,7 +403,7 @@ with col2:
         try:
             client = get_client(api_key_input)
 
-            with st.spinner("이미지 생성 중... (high quality 기준 30-60초 소요)"):
+            with st.spinner("이미지 생성 중... (high quality 기준 최대 2분 정도 소요될 수 있음)"):
                 result_image = run_render_pipeline(
                     client=client,
                     model_name=model_name,
@@ -417,8 +412,6 @@ with col2:
                     resolution=resolution,
                     quality=quality,
                 )
-
-                result_image = fit_to_16_9(result_image, target_size=(1792, 1024))
 
             st.image(result_image, caption="생성 결과", use_container_width=True)
 
