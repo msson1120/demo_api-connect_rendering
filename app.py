@@ -1,13 +1,11 @@
 import streamlit as st
 import pandas as pd
 import time
-import uuid
 import os
+import hashlib
 from datetime import datetime
 from PIL import Image
 from io import BytesIO
-
-import hashlib
 
 from google import genai
 from google.genai import types
@@ -18,19 +16,22 @@ from google.genai import types
 # =========================
 
 st.set_page_config(
-    page_title="AI 조감도 생성 데모",
+    page_title="PlanVision AI - demo",
     page_icon="🏙️",
     layout="wide"
 )
 
 LOG_PATH = "usage_log.csv"
 
-
-# =========================
-# 비용 추정 설정
-# 실제 과금액이 아니라 데모용 추정값입니다.
-# 필요하면 모델별 단가를 직접 조정하세요.
-# =========================
+LOG_COLUMNS = [
+    "time",
+    "user_name",
+    "ip",
+    "project",
+    "model",
+    "prompt_length",
+    "cost_krw_est",
+]
 
 COST_PER_CALL_KRW = {
     "gemini-3.1-flash-image-preview": 50,
@@ -40,56 +41,53 @@ COST_PER_CALL_KRW = {
 
 
 # =========================
-# Gemini Client
+# 로그 유틸
 # =========================
 
-def get_client():
-    api_key = api_key_input or st.secrets.get("GEMINI_API_KEY", None) or os.getenv("GEMINI_API_KEY")
+def normalize_log_df(df: pd.DataFrame) -> pd.DataFrame:
+    for col in LOG_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
 
-    if not api_key:
-        st.error("GEMINI API KEY를 입력하세요.")
-        st.stop()
-
-    return genai.Client(api_key=api_key)
+    return df[LOG_COLUMNS]
 
 
-# =========================
-# 로그 저장
-# =========================
+def read_log() -> pd.DataFrame:
+    if not os.path.exists(LOG_PATH):
+        return pd.DataFrame(columns=LOG_COLUMNS)
+
+    try:
+        df = pd.read_csv(LOG_PATH, encoding="utf-8-sig")
+    except Exception:
+        df = pd.read_csv(LOG_PATH)
+
+    df = normalize_log_df(df)
+
+    # 기존 CSV 컬럼 구조가 다르면 즉시 새 구조로 재저장
+    df.to_csv(LOG_PATH, index=False, encoding="utf-8-sig")
+
+    return df
+
 
 def write_log(row: dict):
-    columns = [
-        "time",
-        "user_name",
-        "ip",
-        "project",
-        "model",
-        "prompt_length",
-        "cost_krw_est"
-    ]
+    new_row = {}
 
-    df = pd.DataFrame([row])
+    for col in LOG_COLUMNS:
+        new_row[col] = row.get(col, "")
 
-    for col in columns:
-        if col not in df.columns:
-            df[col] = None
+    existing_df = read_log()
+    new_df = pd.DataFrame([new_row], columns=LOG_COLUMNS)
 
-    df = df[columns]
+    result_df = pd.concat([existing_df, new_df], ignore_index=True)
+    result_df = normalize_log_df(result_df)
 
-    if os.path.exists(LOG_PATH):
-        existing_df = pd.read_csv(LOG_PATH)
-
-        if list(existing_df.columns) != columns:
-            df.to_csv(LOG_PATH, index=False, encoding="utf-8-sig")
-        else:
-            df.to_csv(LOG_PATH, mode="a", header=False, index=False, encoding="utf-8-sig")
-    else:
-        df.to_csv(LOG_PATH, index=False, encoding="utf-8-sig")
+    result_df.to_csv(LOG_PATH, index=False, encoding="utf-8-sig")
 
 
 def get_client_ip():
     try:
         headers = st.context.headers
+
         ip = headers.get("x-forwarded-for", "")
         if ip:
             return ip.split(",")[0].strip()
@@ -115,7 +113,21 @@ def estimate_cost_krw(model_name: str):
 
 
 # =========================
-# 이미지 변환
+# Gemini Client
+# =========================
+
+def get_client(api_key_input):
+    api_key = api_key_input or st.secrets.get("GEMINI_API_KEY", None) or os.getenv("GEMINI_API_KEY")
+
+    if not api_key:
+        st.error("GEMINI API KEY를 입력하세요.")
+        st.stop()
+
+    return genai.Client(api_key=api_key)
+
+
+# =========================
+# 이미지 처리
 # =========================
 
 def uploaded_file_to_pil(uploaded_file):
@@ -123,10 +135,16 @@ def uploaded_file_to_pil(uploaded_file):
 
 
 def extract_image_from_response(response):
-    for part in response.candidates[0].content.parts:
+    if not response.candidates:
+        return None
+
+    parts = response.candidates[0].content.parts
+
+    for part in parts:
         if getattr(part, "inline_data", None):
             image_bytes = part.inline_data.data
             return Image.open(BytesIO(image_bytes))
+
     return None
 
 
@@ -156,6 +174,7 @@ def generate_image(client, model_name, prompt, input_image, resolution, thinking
             "medium": 4096,
             "high": 8192,
         }
+
         config_kwargs["thinking_config"] = types.ThinkingConfig(
             thinking_budget=thinking_budget_map[thinking_level]
         )
@@ -163,20 +182,14 @@ def generate_image(client, model_name, prompt, input_image, resolution, thinking
     try:
         response = client.models.generate_content(
             model=model_name,
-            contents=[
-                prompt,
-                input_image
-            ],
+            contents=[prompt, input_image],
             config=types.GenerateContentConfig(**config_kwargs)
         )
 
     except Exception:
         response = client.models.generate_content(
             model=model_name,
-            contents=[
-                prompt,
-                input_image
-            ],
+            contents=[prompt, input_image],
             config=types.GenerateContentConfig(
                 response_modalities=["TEXT", "IMAGE"]
             )
@@ -222,15 +235,13 @@ with st.sidebar:
     resolution = st.selectbox(
         "Resolution",
         ["1K", "2K"],
-        index=0,
-        help="모델에 따라 지원되지 않을 수 있습니다."
+        index=0
     )
 
     thinking_level = st.selectbox(
         "Thinking level",
         ["none", "low", "medium", "high"],
-        index=0,
-        help="이미지 모델에서는 지원되지 않을 수 있습니다."
+        index=0
     )
 
     top_p = st.slider(
@@ -242,18 +253,16 @@ with st.sidebar:
     )
 
     st.divider()
-
     st.subheader("로그")
-    if os.path.exists(LOG_PATH):
-        log_df = pd.read_csv(LOG_PATH)
-        st.download_button(
-            "사용 로그 CSV 다운로드",
-            data=log_df.to_csv(index=False, encoding="utf-8-sig"),
-            file_name="usage_log.csv",
-            mime="text/csv"
-        )
-    else:
-        st.info("아직 로그가 없습니다.")
+
+    log_df_sidebar = read_log()
+
+    st.download_button(
+        "사용 로그 CSV 다운로드",
+        data=log_df_sidebar.to_csv(index=False, encoding="utf-8-sig"),
+        file_name="usage_log.csv",
+        mime="text/csv"
+    )
 
 
 uploaded_image = st.file_uploader(
@@ -282,6 +291,8 @@ prompt = st.text_area(
 
 col1, col2 = st.columns(2)
 
+input_pil = None
+
 with col1:
     if uploaded_image:
         input_pil = uploaded_file_to_pil(uploaded_image)
@@ -299,13 +310,11 @@ with col2:
             st.warning("입력 이미지를 업로드하세요.")
             st.stop()
 
-        request_id = str(uuid.uuid4())
         start_time = time.time()
-        success = False
         error_message = ""
 
         try:
-            client = get_client()
+            client = get_client(api_key_input)
 
             with st.spinner("이미지 생성 중..."):
                 result_image = generate_image(
@@ -318,10 +327,7 @@ with col2:
                     top_p=top_p
                 )
 
-            elapsed_sec = round(time.time() - start_time, 2)
-
             if result_image:
-                success = True
                 st.image(result_image, caption="생성 결과", use_container_width=True)
 
                 output_buffer = BytesIO()
@@ -330,7 +336,7 @@ with col2:
                 st.download_button(
                     "결과 이미지 다운로드",
                     data=output_buffer.getvalue(),
-                    file_name=f"result_{request_id}.png",
+                    file_name=f"result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png",
                     mime="image/png",
                     use_container_width=True
                 )
@@ -339,7 +345,6 @@ with col2:
                 st.error(error_message)
 
         except Exception as e:
-            elapsed_sec = round(time.time() - start_time, 2)
             error_message = str(e)
             st.error(error_message)
 
@@ -357,24 +362,18 @@ with col2:
                 "cost_krw_est": estimate_cost_krw(model_name),
             })
 
+            st.rerun()
+
 
 st.divider()
-
 st.subheader("최근 사용 로그")
 
-if os.path.exists(LOG_PATH):
-    log_df = pd.read_csv(LOG_PATH)
-    display_cols = [
-        "time",
-        "user_name",
-        "ip",
-        "project",
-        "model",
-        "prompt_length",
-        "cost_krw_est",
-    ]
+log_df = read_log()
 
-    existing_cols = [c for c in display_cols if c in log_df.columns]
-    st.dataframe(log_df[existing_cols].tail(20), use_container_width=True)
+if len(log_df) > 0:
+    st.dataframe(
+        log_df.tail(20).reset_index(drop=True),
+        use_container_width=True
+    )
 else:
     st.caption("아직 기록된 사용 로그가 없습니다.")
