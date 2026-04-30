@@ -154,14 +154,46 @@ def mask_ip(ip: str):
     return hashlib.sha256(ip.encode("utf-8")).hexdigest()[:12]
 
 
-def estimate_cost_krw(model_name: str, prompt_length: int):
-    token_est = prompt_length / 4
-    cost_per_1k = {
-        "gemini-3.1-flash-image-preview": 5,
-        "gemini-3-pro-image-preview": 15,
-        "gemini-2.5-flash-image": 4,
-    }
-    return int((token_est / 1000) * cost_per_1k.get(model_name, 5))
+USD_TO_KRW = 1400
+
+IMAGE_OUTPUT_COST_USD = {
+    "gemini-2.5-flash-image": {
+        "1K": 0.039,
+        "2K": 0.039,
+        "4K": 0.039,
+    },
+    "gemini-3.1-flash-image-preview": {
+        "1K": 0.067,
+        "2K": 0.067,
+        "4K": 0.151,
+    },
+    "gemini-3-pro-image-preview": {
+        "1K": 0.134,
+        "2K": 0.134,
+        "4K": 0.240,
+    },
+}
+
+TEXT_INPUT_COST_PER_1M_USD = {
+    "gemini-2.5-flash-image": 0.10,
+    "gemini-3.1-flash-image-preview": 0.25,
+    "gemini-3-pro-image-preview": 2.00,
+}
+
+
+def estimate_cost_krw(model_name: str, prompt_length: int, resolution: str):
+    input_tokens_est = max(int(prompt_length / 3.5), 1)
+
+    text_input_usd = (
+        input_tokens_est / 1_000_000
+    ) * TEXT_INPUT_COST_PER_1M_USD.get(model_name, 0.25)
+
+    image_output_usd = IMAGE_OUTPUT_COST_USD.get(
+        model_name, {}
+    ).get(resolution, 0.067)
+
+    total_usd = text_input_usd + image_output_usd
+    return int(round(total_usd * USD_TO_KRW))
 
 
 # =========================
@@ -405,7 +437,7 @@ with col2:
                 "purpose": purpose,
                 "model": model_name,
                 "prompt_length": len(prompt),
-                "cost_krw_est": estimate_cost_krw(model_name, len(prompt)),
+                "cost_krw_est": estimate_cost_krw(model_name, len(prompt), resolution),
                 "output_path": output_path if "output_path" in locals() else "",
             })
 
