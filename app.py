@@ -22,6 +22,8 @@ st.set_page_config(
 )
 
 LOG_PATH = "usage_log.csv"
+OUTPUT_DIR = "outputs"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 LOG_COLUMNS = [
     "time",
@@ -31,6 +33,7 @@ LOG_COLUMNS = [
     "model",
     "prompt_length",
     "cost_krw_est",
+    "output_path",
 ]
 
 
@@ -190,7 +193,7 @@ def extract_image_from_response(response):
 # Gemini 호출
 # =========================
 
-def generate_image(client, model_name, prompt, input_image, resolution, thinking_level, top_p):
+def generate_image(client, model_name, prompt, input_image, resolution, top_p):
     config_kwargs = {
         "response_modalities": ["TEXT", "IMAGE"],
         "top_p": top_p,
@@ -202,20 +205,11 @@ def generate_image(client, model_name, prompt, input_image, resolution, thinking
         image_config_kwargs["image_size"] = "1K"
     elif resolution == "2K":
         image_config_kwargs["image_size"] = "2K"
+    elif resolution == "4K":
+        image_config_kwargs["image_size"] = "4K"
 
     if image_config_kwargs:
         config_kwargs["image_config"] = types.ImageConfig(**image_config_kwargs)
-
-    if thinking_level != "none":
-        thinking_budget_map = {
-            "low": 1024,
-            "medium": 4096,
-            "high": 8192,
-        }
-
-        config_kwargs["thinking_config"] = types.ThinkingConfig(
-            thinking_budget=thinking_budget_map[thinking_level]
-        )
 
     try:
         response = client.models.generate_content(
@@ -272,14 +266,9 @@ with st.sidebar:
 
     resolution = st.selectbox(
         "Resolution",
-        ["1K", "2K"],
-        index=0
-    )
-
-    thinking_level = st.selectbox(
-        "Thinking level",
-        ["none", "low", "medium", "high"],
-        index=0
+        ["1K", "2K", "4K"],
+        index=0,
+        help="모델에 따라 4K는 지원되지 않을 수 있습니다."
     )
 
     top_p = st.slider(
@@ -361,20 +350,30 @@ with col2:
                     prompt=prompt,
                     input_image=input_pil,
                     resolution=resolution,
-                    thinking_level=thinking_level,
                     top_p=top_p
                 )
 
             if result_image:
                 st.image(result_image, caption="생성 결과", use_container_width=True)
 
+                save_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+                safe_user = user_name.replace(" ", "_")
+                safe_project = project_name.replace(" ", "_") if project_name else "no_project"
+
+                output_filename = f"{save_time}_{safe_user}_{safe_project}_{model_name}_{resolution}.png"
+                output_path = os.path.join(OUTPUT_DIR, output_filename)
+
+                result_image.save(output_path, format="PNG")
+
                 output_buffer = BytesIO()
                 result_image.save(output_buffer, format="PNG")
+
+                st.success(f"이미지가 자동 저장되었습니다: {output_path}")
 
                 st.download_button(
                     "결과 이미지 다운로드",
                     data=output_buffer.getvalue(),
-                    file_name=f"result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png",
+                    file_name=output_filename,
                     mime="image/png",
                     use_container_width=True
                 )
@@ -398,6 +397,7 @@ with col2:
                 "model": model_name,
                 "prompt_length": len(prompt),
                 "cost_krw_est": estimate_cost_krw(model_name, len(prompt)),
+                "output_path": output_path if "output_path" in locals() else "",
             })
 
 
@@ -497,3 +497,32 @@ else:
         file_name=f"usage_log_{period}.csv",
         mime="text/csv"
     )
+
+st.divider()
+st.subheader("생성 이미지 갤러리")
+
+image_files = sorted(
+    [f for f in os.listdir(OUTPUT_DIR) if f.endswith(".png")],
+    reverse=True
+)
+
+if len(image_files) == 0:
+    st.caption("아직 생성된 이미지가 없습니다.")
+else:
+    cols = st.columns(3)
+
+    for idx, img_file in enumerate(image_files[:30]):
+        img_path = os.path.join(OUTPUT_DIR, img_file)
+
+        with cols[idx % 3]:
+            st.image(img_path, use_container_width=True)
+            st.caption(img_file)
+
+            with open(img_path, "rb") as f:
+                st.download_button(
+                    "다운로드",
+                    f,
+                    file_name=img_file,
+                    mime="image/png",
+                    key=img_file
+                )
